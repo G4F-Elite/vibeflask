@@ -1,10 +1,12 @@
 {
   "name": "byte-regent-lab",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Satirical raw-HTTP lab where GPT receives request bytes and writes response bytes by hand.",
   "scripts": {
+    "check": "node --check server.js && node scripts/smoke.mjs",
+    "smoke": "node scripts/smoke.mjs",
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
