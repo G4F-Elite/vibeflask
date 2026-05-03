@@ -3,6 +3,7 @@
   "version": "0.4.0",
   "private": true,
   "type": "module",
+  "license": "0BSD",
   "description": "Satirical raw-HTTP lab where GPT receives request bytes and writes response bytes by hand.",
   "scripts": {
     "check": "node --check server.js && node scripts/smoke.mjs",
