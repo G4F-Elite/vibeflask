@@ -1,98 +1,61 @@
 # Byte Regent
 
-Сатирическая лаборатория, где сайт притворяется живым HTTP-сервером, а модели получают сырые байты запроса и сами пишут байты ответа.
+The site is not served by a normal web server. Two OpenAI models do all the work: one writes a quick throwaway HTML page so the browser has something to show right away, the other one gets the actual raw HTTP request bytes and has to respond with raw HTTP response bytes. The server just glues it together and keeps some memory between requests.
 
-Это не “обычный SSR”. Здесь идея ровно в другом:
+If the model spits out broken HTML, you see broken HTML. Nothing cleans it up.
 
-- `gpt-5.4-mini` отдает быструю provisional-страницу для первого открытия
-- `gpt-5.4` получает raw request bytes и пишет raw HTTP response bytes
-- сервер держит runtime memory между запросами
-- клиент получает мгновенный boot, а потом SSE-замену на финальный ответ
-- кривой модельный HTML не “приукрашивается” локальным дизайнерским фронтом
+## What's in the repo
 
-## Что в репозитории
+- `server.js` — everything lives here: TCP server, control panel, boot/prime paths, SSE bridge, prompt building
+- `scripts/smoke.mjs` — smoke test that works without a real OpenAI key
+- `.env.example` — sample config, copy it to `.env` and fill in your key
+- `package.json` — start/dev/smoke/check scripts
 
-- [server.js](/C:/Users/Ko20/Desktop/dfgdfg/bue/vibeflask/server.js) — весь рантайм: raw TCP server, control surface, boot path, prime path, SSE bridge, prompt assembly
-- [scripts/smoke.mjs](/C:/Users/Ko20/Desktop/dfgdfg/bue/vibeflask/scripts/smoke.mjs) — локальный smoke-check без реального OpenAI key
-- [.env.example](/C:/Users/Ko20/Desktop/dfgdfg/bue/vibeflask/.env.example) — пример конфига
-- [package.json](/C:/Users/Ko20/Desktop/dfgdfg/bue/vibeflask/package.json) — скрипты запуска и проверки
+## How it works
 
-## Как это работает
+**Boot path** (browser navigates to a page):
 
-### 1. Boot path
+1. Server sees it looks like a navigation request.
+2. `gpt-5.4-mini` writes a quick provisional HTML page.
+3. Server tacks on a tiny SSE script so the page can update itself later.
+4. Meanwhile `gpt-5.4` works on the real response (raw HTTP, base64-encoded).
+5. When that's done, the SSE pushes a `swap` and the whole page gets replaced.
 
-Когда браузер открывает страницу как документ:
+**Prime path** (everything else: fetches, subresources, whatever):
 
-1. сервер определяет navigation-like запрос
-2. `gpt-5.4-mini` пишет provisional HTML
-3. сервер добавляет только маленький live bridge через SSE
-4. `gpt-5.4` параллельно пишет полноценный raw HTTP response
-5. когда финальный ответ готов, клиент получает `swap` и документ заменяется целиком
+No boot wrapper. Server just waits for `gpt-5.4` to finish. The model gets the exact request bytes and must return a full `HTTP/1.1` response in base64.
 
-### 2. Prime path
+**Memory:**
 
-Для non-navigation запросов никакой boot-обертки нет:
+The server process keeps stuff in RAM between requests:
 
-- сервер ждет `gpt-5.4`
-- модель получает exact raw request bytes
-- модель обязана вернуть full HTTP/1.1 response в base64
+- Global `siteMemory`
+- Per-route `routeMemory` (keyed `METHOD target`)
+- Short summaries of recent exchanges
+- Previous response per route
 
-### 3. Runtime memory
+Old/garbled memory is not fed back into prompts. Earlier versions did that and the output went to shit.
 
-Сервер хранит в памяти процесса:
-
-- глобальную `siteMemory`
-- `routeMemory` по ключу `METHOD target`
-- краткие summary последних обменов
-- предыдущий ответ по маршруту
-
-При этом в prompt больше не подмешиваются явно битые summary/memory/previous response, чтобы модель не отравлялась старым мусором и не скатывалась в несвязный текст.
-
-## Почему текст теперь лучше
-
-В prompt ужесточены правила:
-
-- язык вывода привязывается к концепту и заголовкам запроса
-- visible copy должна быть связной, без mojibake и псевдо-русского мусора
-- у server persona должна быть раздраженная харизма
-- слово `харизма` подталкивается в русских HTML-ответах как часть тона
-- boot и prime path больше не кормятся явно битой памятью
-
-Важно: сам raw HTML от модели по-прежнему не “редактируется в красоту”. Если модель прислала странный HTML, клиент увидит именно его.
-
-## Быстрый старт
-
-1. Скопируй пример конфига:
+## Quick start
 
 ```bash
 copy .env.example .env
-```
-
-2. Заполни `OPENAI_API_KEY` в `.env`
-
-3. Запусти сервер:
-
-```bash
+# put your OPENAI_API_KEY in .env
 npm start
 ```
 
-4. Открой:
+Then open `http://localhost:3000/__control` or `http://localhost:3000/`.
 
-- `http://localhost:3000/__control`
-- `http://localhost:3000/`
-
-## Команды
+## Scripts
 
 ```bash
-npm start
-npm run dev
-npm run smoke
-npm run check
+npm start        # run the server
+npm run dev      # run with --watch
+npm run smoke    # smoke test, no real API key needed
+npm run check    # lint
 ```
 
-`npm run smoke` не требует реального OpenAI key: скрипт специально поднимает сервер с пустым ключом и проверяет локальные ветки поведения.
-
-## Конфиг
+## Config
 
 ```env
 OPENAI_API_KEY=
@@ -107,27 +70,13 @@ OPENAI_STORE=true
 PORT=3000
 ```
 
-## Важные маршруты
+## Routes
 
-- `/__control` — ручка для смены концепта
-- `/__health` — статус рантайма и boot state
-- `/__live?visit=...` — SSE stream для boot bridge
-- `/` и любые другие неслужебные пути — model-driven site
+- `/__control` — change the site concept
+- `/__health` — runtime status, boot state
+- `/__live?visit=...` — SSE stream for the boot bridge
+- everything else — model writes the response
 
-## Ограничения
+## What this is and isn't
 
-- это намеренно нестабильный арт-проект, а не надежный production stack
-- нет дисковой персистентности памяти, только RAM
-- нет локального sanitize/render-layer, который “спасает” плохой HTML от модели
-- если модель пишет плохой raw response, это часть эксперимента
-
-## Что здесь считается “почти продом”
-
-Для этого репо “нормальное состояние” означает:
-
-- понятный README
-- пример конфига без утечки реального ключа
-- smoke-check
-- чистый git-репозиторий без мусорных логов
-- внятные prompt-ограничения для языка, тона и структуры
-- воспроизводимый локальный запуск
+This is a deliberately unstable art project. There is no disk persistence, no HTML sanitizer, no fallback renderer. If the model writes garbage, that's the point. The "production-ready" bar here is: the README makes sense, there's a smoke test, the config doesn't leak keys, and you can clone and run it locally without guessing.
