@@ -29,9 +29,9 @@ try {
   const health = await healthResult.json();
   assert.equal(health.ok, true, "health payload should be ok=true");
   assert.equal(
-    typeof health.bootModel,
+    typeof health.primaryModel,
     "string",
-    "health payload should expose boot model"
+    "health payload should expose primary model"
   );
 
   const control = await fetchText("/__control");
@@ -39,11 +39,11 @@ try {
   assert.match(control.text, /Byte Regent Raw HTTP Lab/, "control page should render");
 
   const home = await fetchText("/");
-  assert.equal(home.response.status, 200, "home page should return 200");
+  assert.equal(home.response.status, 502, "home page should fail closed without API key");
   assert.match(
     home.text,
-    /byte-regent-live-status|__live\?visit=/,
-    "boot page should contain live bridge markup"
+    /OPENAI_API_KEY is empty|Prime request failed/i,
+    "home page should surface the blocking model error"
   );
 
   const favicon = await fetch(`${baseUrl}/favicon.ico`);
@@ -64,8 +64,8 @@ try {
       {
         ok: true,
         port,
-        bootModel: health.bootModel,
-        bootStatus: health.bootStatus,
+        primaryModel: health.primaryModel,
+        primaryReasoningEffort: health.primaryReasoningEffort,
       },
       null,
       2
