@@ -1,6 +1,6 @@
 # Byte Regent
 
-This repo is a raw HTTP toy server where one OpenAI model receives the exact request bytes and writes the exact response bytes. There is no boot page anymore, no second model, and no client-side hot swap. The browser just waits until the primary model finishes.
+This repo is a raw HTTP toy server where one OpenAI model receives a structured HTTP request interface and writes a structured response. The host still returns real HTTP bytes to the browser, but the model no longer has to hand-author the status line, CRLF header block, or `Content-Length`. There is no boot page, no second model, and no client-side hot swap. The browser just waits until the primary model finishes.
 
 If the model returns broken HTML, broken JS, or malformed design, you see that. If the model call fails, the server returns an error directly.
 
@@ -13,11 +13,11 @@ If the model returns broken HTML, broken JS, or malformed design, you see that. 
 
 ## How it works
 
-1. The server reads the raw HTTP request bytes from the socket.
-2. It sends those exact bytes to `gpt-5.4`.
-3. The model must return JSON with `summary`, `site_memory`, `route_memory`, and `response_bytes_base64`.
-4. `response_bytes_base64` must decode to a full `HTTP/1.1` response.
-5. The server returns those bytes to the client as-is.
+1. The server reads the HTTP request from the socket.
+2. It gives `gpt-5.4` a convenient request object: method, path, headers, cookies, query params, body preview, parsed JSON/form data, and raw base64 fallback.
+3. The model returns JSON with `summary`, `site_memory`, `route_memory`, and `response`.
+4. `response` contains `status_code`, `reason_phrase`, `content_type`, `headers`, `body_text`, and optional `body_base64`.
+5. The server assembles the final `HTTP/1.1` bytes and returns them to the client.
 
 There is no placeholder shell while waiting. A page load can hang for a while if the model thinks for a while.
 

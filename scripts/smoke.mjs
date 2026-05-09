@@ -36,7 +36,12 @@ try {
 
   const control = await fetchText("/__control");
   assert.equal(control.response.status, 200, "control page should return 200");
-  assert.match(control.text, /Byte Regent Raw HTTP Lab/, "control page should render");
+  assert.match(control.text, /Byte Regent Lab/, "control page should render");
+  assert.match(
+    control.text,
+    /structured status, headers, content_type, body_text/,
+    "control page should describe the structured model interface"
+  );
 
   const home = await fetchText("/");
   assert.equal(home.response.status, 502, "home page should fail closed without API key");
