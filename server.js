@@ -32,9 +32,12 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 const VISIT_TTL_MS = 20 * 60 * 1000;
 const MAX_RECENT_SUMMARIES = 12;
 const MAX_RECENT_EXCHANGES = 12;
+const MAX_RECENT_POST_REQUESTS = 18;
+const MAX_PAGE_CONTEXTS = 8;
 const MAX_PREVIEW_CHARS = 6000;
 const MAX_PREVIOUS_RESPONSE_BYTES = 120000;
 const MAX_BODY_PREVIEW_CHARS = 5000;
+const MAX_CONTEXT_PREVIEW_CHARS = 7000;
 const MAX_PROMPT_BASE64_CHARS = 60000;
 
 const PRIME_SCHEMA = {
@@ -87,6 +90,8 @@ const STATE = {
     "Fresh runtime. No meaningful requests have been completed yet. The site persona has not stabilized, but it should feel sharp, coherent, and full of charisma.",
   recentPrimeSummaries: [],
   recentExchanges: [],
+  recentPostRequests: [],
+  pageContexts: [],
   latestByRoute: new Map(),
   routeMemories: new Map(),
   visits: new Map(),
@@ -230,9 +235,11 @@ async function handleRawRequest(socket, request) {
       revision: STATE.revision,
       primaryModel: CONFIG.primaryModel,
       primaryReasoningEffort: CONFIG.primaryReasoningEffort,
-      modelInterface: "structured-http-v1",
+      modelInterface: "structured-http-v1+self-post-context-v1",
       hasApiKey: Boolean(CONFIG.apiKey),
       routeMemoryCount: STATE.routeMemories.size,
+      recentPostRequests: STATE.recentPostRequests.length,
+      pageContexts: STATE.pageContexts.length,
       visits: STATE.visits.size,
     });
   }
@@ -275,6 +282,8 @@ async function handleControlUpdate(socket, request) {
     STATE.routeMemories.clear();
     STATE.recentPrimeSummaries = [];
     STATE.recentExchanges = [];
+    STATE.recentPostRequests = [];
+    STATE.pageContexts = [];
   }
 
   return sendRedirect(socket, "/__control");
@@ -357,6 +366,8 @@ async function runPrimeVisit(visit) {
       routeMemory: STATE.routeMemories.get(routeKey),
       statusLine: rawResponse.statusLine,
     });
+    rememberPageContext(visit.request, rawResponse, visit.summary);
+    rememberPostRequest(visit.request, rawResponse, visit.summary);
     return visit.finalResponse;
   } catch (error) {
     visit.status = "failed";
@@ -393,7 +404,19 @@ function buildPrimePayload(visit) {
       "For browser navigations, prefer complete HTML documents with inline CSS and JS.",
       "For HTML responses, use UTF-8 text/html unless you have a concrete reason not to.",
       "Do not use external assets, remote fonts, libraries, CDNs, or network calls.",
-      "Only use fetch, XHR, EventSource, WebSocket, or other network APIs when the requested experience truly needs them.",
+      "Mandatory local interaction pattern:",
+      "- If a generated GET page contains any user input, action button, state change, generated result, or multi-step interaction, the HTML MUST include JavaScript that sends those actions to a same-origin POST route.",
+      "- Default POST route: the current page path, using fetch(location.pathname, { method: 'POST', headers: {'Content-Type':'application/json','Accept':'application/json'}, body: JSON.stringify({ kind, page: location.pathname, state, input, meta }) }).",
+      "- The page MUST intercept forms with event.preventDefault() and MUST NOT rely on browser form navigation for in-app actions.",
+      "- The page must choose meaningful generic action kinds, send the current input and state, then render the POST response into the current DOM without reloading.",
+      "- A browser page may use local POST without an AbortController or client timeout; the host keeps the socket open while you answer that request in a new model turn.",
+      "- When you create local POST routes, define the request and response contract in the page code, validate the POST body on the next turn, and keep the contract stable.",
+      "After the initial page load, avoid opening, re-opening, or navigating to generated pages with new GET requests.",
+      "In generated HTML, use buttons and JavaScript fetch POST calls for in-app actions instead of links, location.href, window.open, form method=get, or form submissions that navigate.",
+      "When the current request is POST from a generated page, respond directly to that action. Prefer application/json with fields like ok, message, html, state, title, error. Use small HTML fragments or text only when that is the route contract.",
+      "Do not return 3xx redirects for normal in-app POST flows. Return a direct response that the current page can consume.",
+      "Use generated GET routes only for the first document navigation, a deliberate browser refresh, or simple read-only probes that the user explicitly requested.",
+      "Do not call external origins. Only use fetch, XHR, EventSource, WebSocket, or other network APIs for same-origin local requests or when the requested experience truly needs them.",
       "For games, toys, visual demos, calculators, editors, and small experiments, keep the whole experience local in one document whenever possible.",
       "Be concise. The first final response should be compact and ship fast, not expansive.",
       "Target a compact single-document response. Avoid giant walls of copy, giant CSS blocks, and giant JS blocks.",
@@ -403,6 +426,7 @@ function buildPrimePayload(visit) {
       "If you create continuity with cookies or hidden state, reflect that in site_memory and route_memory.",
       "site_memory is the durable global memory of the whole site across requests.",
       "route_memory is the durable memory of this specific route key.",
+      "Recent page contexts and recent POST requests are included in the prompt. Use them to understand what page initiated local POSTs and what prior local POSTs established.",
       "If the request is not for HTML, still respond sensibly at HTTP level.",
       "Visible copy, summary, site_memory, and route_memory must be coherent natural language.",
       "Do not output mojibake, replacement glyphs, broken transliteration, fake Russian, or random syllables.",
@@ -436,6 +460,8 @@ function buildPrimePrompt(visit, previousBase64, previousRawBytes) {
   const previousResponseInterface = previousRawBytes
     ? buildPreviousResponseInterface(previousRawBytes)
     : null;
+  const pageContexts = formatPageContextsForPrompt();
+  const recentPostRequests = formatPostRequestsForPrompt();
   const recentSummaries = STATE.recentPrimeSummaries.length
     ? STATE.recentPrimeSummaries.map((entry, index) => `${index + 1}. ${entry}`).join("\n")
     : "none";
@@ -464,10 +490,22 @@ function buildPrimePrompt(visit, previousBase64, previousRawBytes) {
     )}`,
     `Route key: ${routeKey}`,
     "",
+    "Current request handling rule:",
+    getCurrentRequestHandlingRule(visit.request),
+    "",
+    "Mandatory local POST client shape for interactive GET pages:",
+    getLocalPostClientShape(visit.request),
+    "",
     "Host runtime facts:",
     "- Built-in routes that already exist: /__control (HTML form) and /__health (JSON).",
     "- No other host JSON/API routes already exist for you.",
     "- The browser is waiting on one blocking response from you. There is no boot page and no later hot-swap layer.",
+    "- Same-origin local POST requests from your generated HTML are first-class model turns. They have no host timeout. You answer them yourself with the same structured response interface.",
+    "- Default local POST contract: GET pages with any interactive input should POST JSON to location.pathname. POST responses should usually be application/json consumed by the current DOM.",
+    "- Interactive pages must wire their controls to POST {kind, input, state, page} to location.pathname and render the returned data without reloading.",
+    "- Avoid new generated GET navigations after the page is loaded. Keep the current document open and communicate with local POST fetches.",
+    "- In-app controls should update the current DOM from POST responses instead of reopening the page, changing location.href, submitting GET forms, or using redirects.",
+    "- For local POSTs, the prompt includes recent page contexts and recent POST request history so you can continue the page's state and contracts.",
     "- If you want extra routes, you must define their contract yourself and then keep answering them coherently on later requests.",
     "- For self-contained toys, games, and interactive demos, prefer zero network calls and fully local state.",
     "",
@@ -486,6 +524,12 @@ function buildPrimePrompt(visit, previousBase64, previousRawBytes) {
     "",
     "Recent exchanges:",
     recentExchanges,
+    "",
+    "Recent page contexts:",
+    pageContexts,
+    "",
+    "Recent local POST requests:",
+    recentPostRequests,
     "",
     "Primary request interface JSON:",
     JSON.stringify(requestInterface, null, 2),
@@ -685,6 +729,60 @@ function truncateBase64(buffer) {
   };
 }
 
+function getCurrentRequestHandlingRule(request) {
+  if (request.method === "GET") {
+    return [
+      "This is a document/navigation GET.",
+      "If you return an interactive page, include the local POST client now.",
+      "Any user input, action button, generated result, state change, save action, or computed result must call fetch(location.pathname, { method: 'POST', headers: {'Content-Type':'application/json','Accept':'application/json'}, body: JSON.stringify({ kind, page: location.pathname, state, input, meta }) }).",
+      "The generated page must render POST results into the current DOM and must not navigate to another generated GET route for normal interaction.",
+    ].join("\n");
+  }
+
+  if (request.method === "POST") {
+    return [
+      "This is a local interaction POST from a generated page or client.",
+      "Read request.body.parsed_json, request.body.parsed_form, cookies, query, recent page contexts, and recent POST history.",
+      "Answer the action directly. Prefer response.content_type application/json; charset=utf-8 and response.body_text as JSON such as {\"ok\":true,\"message\":\"...\",\"html\":\"...\",\"state\":{}}.",
+      "Do not return a full replacement document or redirect unless the posted contract explicitly asks for that.",
+    ].join("\n");
+  }
+
+  return "Handle this method sensibly at HTTP level. For in-app mutation, prefer the local POST contract.";
+}
+
+function getLocalPostClientShape(request) {
+  if (request.method !== "GET") {
+    return "Not applicable to this request unless you are returning a new interactive HTML document.";
+  }
+
+  return [
+    "Adapt this pattern into the page when there is any user input or action button:",
+    "<script>",
+    "const state = {};",
+    "async function postLocal(kind, payload) {",
+    "  const response = await fetch(location.pathname, {",
+    "    method: 'POST',",
+    "    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },",
+    "    body: JSON.stringify({ kind, page: location.pathname, state, ...payload })",
+    "  });",
+    "  const text = await response.text();",
+    "  let data = null;",
+    "  try { data = JSON.parse(text); } catch { data = { ok: response.ok, message: text }; }",
+    "  if (!response.ok || data.ok === false) throw new Error(data.error || data.message || 'POST failed');",
+    "  return data;",
+    "}",
+    "form.addEventListener('submit', async (event) => {",
+    "  event.preventDefault();",
+    "  const input = readCurrentInputFromPage();",
+    "  const data = await postLocal('submit', { input, meta: collectUsefulPageMeta() });",
+    "  if (data.state && typeof data.state === 'object') Object.assign(state, data.state);",
+    "  renderCurrentPageFromStateAndResponse(state, data);",
+    "});",
+    "</script>",
+  ].join("\n");
+}
+
 function buildOpenAiPayload({
   model,
   reasoningEffort,
@@ -816,6 +914,8 @@ function renderControlPage() {
           <pre>revision: ${STATE.revision}
 visits.in.memory: ${STATE.visits.size}
 routes.in.memory: ${STATE.routeMemories.size}
+page.contexts: ${STATE.pageContexts.length}
+post.requests.memory: ${STATE.recentPostRequests.length}
 primary.model: ${escapeHtml(CONFIG.primaryModel)}
 primary.reasoning: ${escapeHtml(CONFIG.primaryReasoningEffort || "none")}
 api.key.present: ${CONFIG.apiKey ? "yes" : "no"}</pre>
@@ -848,8 +948,16 @@ api.key.present: ${CONFIG.apiKey ? "yes" : "no"}</pre>
         <article class="panel">
           <h2>Model Interface</h2>
           <pre>${escapeHtml(
-            `Every site request waits for ${CONFIG.primaryModel}. The model returns structured status, headers, content_type, body_text, and optional body_base64; the host assembles HTTP bytes.`
+            `Every site request waits for ${CONFIG.primaryModel}. The model returns structured status, headers, content_type, body_text, and optional body_base64; the host assembles HTTP bytes. Interactive GET pages must include a local POST client that fetches location.pathname, and POST turns receive recent page plus POST context. After initial load, generated pages should keep the current document open and use local POST fetches instead of new GET navigations.`
           )}</pre>
+        </article>
+        <article class="panel">
+          <h2>Recent Local POSTs</h2>
+          <pre>${escapeHtml(formatPostRequestsForPrompt())}</pre>
+        </article>
+        <article class="panel">
+          <h2>Recent Page Contexts</h2>
+          <pre>${escapeHtml(formatPageContextsForPrompt())}</pre>
         </article>
       </section>
     </main>
@@ -1134,6 +1242,154 @@ function rememberExchange(exchange) {
   if (STATE.recentExchanges.length > MAX_RECENT_EXCHANGES) {
     STATE.recentExchanges.splice(MAX_RECENT_EXCHANGES);
   }
+}
+
+function rememberPageContext(request, rawResponse, summary) {
+  if (!rawResponse.isHtml) {
+    return;
+  }
+
+  const bodyText = rawResponse.bodyBuffer.toString("utf8");
+  if (looksCorruptedText(bodyText)) {
+    return;
+  }
+
+  STATE.pageContexts.unshift({
+    updatedAt: new Date().toISOString(),
+    routeKey: truncateText(getRouteKey(request), 180),
+    requestLine: truncateText(`${request.method} ${request.target}`, 240),
+    statusLine: truncateText(rawResponse.statusLine, 140),
+    summary: truncateText(summary, 500),
+    title: extractHtmlTitle(bodyText),
+    visibleTextPreview: extractVisibleTextPreview(bodyText),
+    htmlPreview: truncateText(bodyText, MAX_CONTEXT_PREVIEW_CHARS),
+  });
+
+  if (STATE.pageContexts.length > MAX_PAGE_CONTEXTS) {
+    STATE.pageContexts.splice(MAX_PAGE_CONTEXTS);
+  }
+}
+
+function rememberPostRequest(request, rawResponse, summary) {
+  if (request.method !== "POST") {
+    return;
+  }
+
+  const requestInterface = buildRequestInterface(request);
+  const responseTextPreview = truncateText(
+    rawResponse.bodyBuffer.toString("utf8"),
+    MAX_BODY_PREVIEW_CHARS
+  );
+
+  STATE.recentPostRequests.unshift({
+    createdAt: new Date().toISOString(),
+    routeKey: truncateText(getRouteKey(request), 180),
+    request: {
+      method: requestInterface.method,
+      target: requestInterface.target,
+      path: requestInterface.path,
+      query: requestInterface.query,
+      headers: pickUsefulHeaders(requestInterface.headers.object),
+      cookies: requestInterface.cookies,
+      body: {
+        byte_length: requestInterface.body.byte_length,
+        content_type: requestInterface.body.content_type,
+        text_preview: truncateText(
+          requestInterface.body.text_preview,
+          MAX_BODY_PREVIEW_CHARS
+        ),
+        parsed_json: requestInterface.body.parsed_json,
+        parsed_form: requestInterface.body.parsed_form,
+      },
+    },
+    response: {
+      statusLine: truncateText(rawResponse.statusLine, 140),
+      contentType: truncateText(rawResponse.contentType, 160),
+      summary: truncateText(summary, 500),
+      bodyTextPreview: responseTextPreview,
+    },
+  });
+
+  if (STATE.recentPostRequests.length > MAX_RECENT_POST_REQUESTS) {
+    STATE.recentPostRequests.splice(MAX_RECENT_POST_REQUESTS);
+  }
+}
+
+function formatPageContextsForPrompt() {
+  if (STATE.pageContexts.length === 0) {
+    return "none";
+  }
+
+  return JSON.stringify(
+    STATE.pageContexts.map((entry, index) => ({
+      index: index + 1,
+      ...entry,
+    })),
+    null,
+    2
+  );
+}
+
+function formatPostRequestsForPrompt() {
+  if (STATE.recentPostRequests.length === 0) {
+    return "none";
+  }
+
+  return JSON.stringify(
+    STATE.recentPostRequests.map((entry, index) => ({
+      index: index + 1,
+      ...entry,
+    })),
+    null,
+    2
+  );
+}
+
+function pickUsefulHeaders(headersObject) {
+  const usefulNames = [
+    "accept",
+    "accept-language",
+    "content-type",
+    "origin",
+    "referer",
+    "sec-fetch-dest",
+    "sec-fetch-mode",
+    "sec-fetch-site",
+    "user-agent",
+  ];
+  const picked = {};
+  for (const name of usefulNames) {
+    if (headersObject[name]) {
+      picked[name] = headersObject[name];
+    }
+  }
+  return picked;
+}
+
+function extractHtmlTitle(html) {
+  const match = String(html || "").match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (!match) {
+    return "";
+  }
+  return decodeHtmlEntities(truncateText(match[1].replace(/\s+/g, " ").trim(), 200));
+}
+
+function extractVisibleTextPreview(html) {
+  const withoutScripts = String(html || "")
+    .replace(/<script\b[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[\s\S]*?<\/style>/gi, " ");
+  const text = withoutScripts.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  return decodeHtmlEntities(truncateText(text, 1200));
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
 }
 
 function getRouteKey(request) {

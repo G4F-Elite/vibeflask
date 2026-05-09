@@ -42,6 +42,16 @@ try {
     /structured status, headers, content_type, body_text/,
     "control page should describe the structured model interface"
   );
+  assert.match(
+    control.text,
+    /POST fetches instead of new GET navigations/,
+    "control page should explain the post-only in-page interaction rule"
+  );
+  assert.match(
+    control.text,
+    /Interactive GET pages must include a local POST client/,
+    "control page should explain the mandatory local POST client rule"
+  );
 
   const home = await fetchText("/");
   assert.equal(home.response.status, 502, "home page should fail closed without API key");

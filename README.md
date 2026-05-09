@@ -21,6 +21,12 @@ If the model returns broken HTML, broken JS, or malformed design, you see that. 
 
 There is no placeholder shell while waiting. A page load can hang for a while if the model thinks for a while.
 
+Generated pages can make same-origin local `POST` requests, for example with `fetch('/agent-step', { method: 'POST', body: ... })`. Those requests are handled as fresh model turns with no host-side timeout, so the model can answer its own local routes. The prompt for each turn includes recent page contexts and recent local POST history.
+
+After the initial document load, the model is instructed to keep the current page open and communicate through local `POST` fetches instead of reopening generated pages with new `GET` navigations, redirects, `location.href`, or GET forms.
+
+Interactive GET pages are required to include a POST client immediately. The default route is `location.pathname`, with JSON bodies shaped like `{ "kind": "submit", "input": ..., "state": ..., "page": location.pathname }`. POST responses should normally be JSON that the current page renders into the DOM.
+
 ## Memory
 
 The process keeps a little runtime context in RAM:
@@ -29,6 +35,8 @@ The process keeps a little runtime context in RAM:
 - per-route `routeMemory`
 - short summaries of recent exchanges
 - previous response per route
+- recent HTML page contexts
+- recent local POST requests, including query, cookies, body, response summary, and response preview
 
 Corrupted memory is filtered before it goes back into the next prompt.
 
